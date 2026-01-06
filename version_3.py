@@ -4,8 +4,14 @@ import json
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
-import numpy as np
-import pandas as pd
+try:
+    import numpy as np
+    import pandas as pd
+except ImportError as exc:  # pragma: no cover - defensive import guard
+    missing = "numpy and pandas"
+    raise SystemExit(
+        "Required dependencies are missing. Install them with `pip install -r requirements.txt`."
+    ) from exc
 
 
 # ---------------------------------------------------------------------
