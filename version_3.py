@@ -1,6 +1,5 @@
 import os
 import sys
-import json
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -51,6 +50,37 @@ class Config:
 
 def _as_abs(base_dir: str, path: str) -> str:
     return path if os.path.isabs(path) else os.path.join(base_dir, path)
+
+
+def _resolve_and_validate_inputs(cfg: "Config", base_dir: str) -> Dict[str, str]:
+    """
+    Resolve configured paths to absolute paths and provide a clear error message
+    when required inputs are missing. This avoids pandas raising a less helpful
+    FileNotFoundError deep inside the pipeline.
+    """
+
+    required = {
+        "trade": _as_abs(base_dir, cfg.trade_path),
+        "wgi": _as_abs(base_dir, cfg.wgi_path),
+        "spending": _as_abs(base_dir, cfg.spending_path),
+        "pinksheet": _as_abs(base_dir, cfg.pinksheet_path),
+        "price_series_map": _as_abs(base_dir, cfg.price_series_map_path),
+        "hs4_map": _as_abs(base_dir, cfg.hs4_map_path),
+    }
+
+    optional = {}
+    if cfg.controls_path:
+        optional["controls"] = _as_abs(base_dir, cfg.controls_path)
+
+    missing = [name for name, path in required.items() if not os.path.exists(path)]
+    if missing:
+        search_paths = {**required, **optional}
+        details = ", ".join(f"{k} -> {v}" for k, v in search_paths.items())
+        raise FileNotFoundError(
+            "Missing required input file(s): " + ", ".join(sorted(missing)) + f". Looked for: {details}"
+        )
+
+    return {**required, **optional}
 
 
 # ---------------------------------------------------------------------
@@ -625,6 +655,8 @@ def main() -> None:
     out_dir = _as_abs(base_dir, cfg.out_dir)
     os.makedirs(out_dir, exist_ok=True)
 
+    input_paths = _resolve_and_validate_inputs(cfg, base_dir)
+
     min_returns = cfg.min_monthly_returns_per_window
     if min_returns is None:
         min_returns = 10 * cfg.vol_window_years
@@ -633,8 +665,8 @@ def main() -> None:
             min_returns = 30
 
     print("Loading trade data")
-    trade = load_trade(_as_abs(base_dir, cfg.trade_path))
-    trade = ensure_trade_group(trade, _as_abs(base_dir, cfg.hs4_map_path))
+    trade = load_trade(input_paths["trade"])
+    trade = ensure_trade_group(trade, input_paths["hs4_map"])
     shares_cyg = compute_group_exports_and_total_exports(trade)
 
     print("Computing base period export shares s_cg_base")
@@ -649,8 +681,8 @@ def main() -> None:
 
     print("Computing predetermined global volatility indices G_g_t from Pink Sheet monthly prices")
     commodity_vol, group_vol = compute_group_volatility_indices(
-        pinksheet_path=_as_abs(base_dir, cfg.pinksheet_path),
-        price_series_map_path=_as_abs(base_dir, cfg.price_series_map_path),
+        pinksheet_path=input_paths["pinksheet"],
+        price_series_map_path=input_paths["price_series_map"],
         window_years=cfg.vol_window_years,
         min_returns=min_returns,
     )
@@ -663,8 +695,8 @@ def main() -> None:
 
     print("Computing annual group price index and country shocks Shock_ct")
     group_price_index = compute_group_price_index_annual(
-        pinksheet_path=_as_abs(base_dir, cfg.pinksheet_path),
-        price_series_map_path=_as_abs(base_dir, cfg.price_series_map_path),
+        pinksheet_path=input_paths["pinksheet"],
+        price_series_map_path=input_paths["price_series_map"],
     )
     group_price_index.to_csv(os.path.join(out_dir, "group_price_index_annual.csv"), index=False)
 
@@ -676,19 +708,20 @@ def main() -> None:
     shocks.to_csv(os.path.join(out_dir, f"price_shocks_country_year_L{cfg.shock_trailing_mean_years}.csv"), index=False)
 
     print("Loading spending outcomes")
-    spending = load_spending(_as_abs(base_dir, cfg.spending_path))
+    spending = load_spending(input_paths["spending"])
 
     # Optional controls panel merge, if present
     controls = None
-    if cfg.controls_path and os.path.exists(_as_abs(base_dir, cfg.controls_path)):
-        controls = pd.read_csv(_as_abs(base_dir, cfg.controls_path))
+    controls_path = input_paths.get("controls")
+    if controls_path and os.path.exists(controls_path):
+        controls = pd.read_csv(controls_path)
         _require_cols(controls, ["iso3", "year"], "controls_panel")
         controls = controls.copy()
         controls["iso3"] = controls["iso3"].map(_normalise_iso3)
         controls["year"] = pd.to_numeric(controls["year"], errors="coerce").astype("Int64")
 
     print("Loading WGI government effectiveness and constructing GE_pre_c")
-    wgi = load_wgi(_as_abs(base_dir, cfg.wgi_path))
+    wgi = load_wgi(input_paths["wgi"])
     ge_pre = compute_ge_pre(wgi, cfg.ge_pre_years, cfg.min_ge_pre_obs)
     ge_pre.to_csv(os.path.join(out_dir, "GE_pre_raw.csv"), index=False)
 
